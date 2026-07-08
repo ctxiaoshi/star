@@ -295,51 +295,66 @@ func runAfterRouteGuards(ctx *Context, guards []AfterRouteGuard, handlerResp *Re
 }
 
 // rootHandler 根处理器
+//
+// 路由匹配分两轮：
+//  1. 先精确匹配（非前缀路由）—— API/WS 等具体路由
+//  2. 再前缀匹配（静态文件/SPA）—— 按前缀段数降序，让更具体的前缀
+//     （如 /open-api/static）优先于更宽泛的前缀（如 / 兜底）
+//
+// 这样可保证精确路由永远优先于前缀路由，且更具体的前缀路由优先于更宽泛的前缀路由。
 func (r *Router) rootHandler(ctx *Context) *Response {
 	reqParts := splitPath(ctx.GetPath())
 	method := ctx.GetRequestMethod()
 	pathMatched := false
 
-	for pattern, h := range r.parsedRoutes {
-		patMethod, patPath := parsePatternKey(pattern)
-		patParts := splitPath(patPath)
-		var params map[string]Param
-		var ok bool
+	// 第一轮：精确匹配（非前缀路由）
+	for i := range r.parsedRoutes {
+		h := &r.parsedRoutes[i]
 		if h.isPrefix {
-			if !pathHasPrefix(reqParts, patParts) {
-				continue
-			}
-			ok = true
-			params = make(map[string]Param)
-		} else {
-			params, ok = matchPathPattern(patParts, reqParts)
+			continue
 		}
+		patParts := splitPath(h.path)
+		params, ok := matchPathPattern(patParts, reqParts)
 		if !ok {
 			continue
 		}
 		pathMatched = true
-		if patMethod != ANY && patMethod != method {
+		if h.method != ANY && h.method != method {
 			continue
 		}
+		return r.dispatch(ctx, h, params)
+	}
 
-		ctx.params = params
-		ctx.method = h.method
-
-		if h.meta != nil {
-			ctx.meta = h.meta
+	// 第二轮：前缀匹配（静态文件/SPA）
+	// 按前缀段数降序遍历，让更具体的前缀优先匹配。
+	// 例如 /open-api/static (2 段) 优先于 / (0 段)。
+	var prefixCandidates []int
+	for i := range r.parsedRoutes {
+		if r.parsedRoutes[i].isPrefix {
+			prefixCandidates = append(prefixCandidates, i)
 		}
-		if resp, stop := runBeforeRouteGuards(ctx, r.BeforeHandler); stop {
-			return resp
+	}
+	// 按路径段数降序排序（更具体的前缀在前）
+	for i := 0; i < len(prefixCandidates); i++ {
+		for j := i + 1; j < len(prefixCandidates); j++ {
+			pi := splitPath(r.parsedRoutes[prefixCandidates[i]].path)
+			pj := splitPath(r.parsedRoutes[prefixCandidates[j]].path)
+			if len(pj) > len(pi) {
+				prefixCandidates[i], prefixCandidates[j] = prefixCandidates[j], prefixCandidates[i]
+			}
 		}
-		// 在 beforeHandler 之后解析并绑定DTO，这样可以在 beforeHandler 中对参数做前置处理，比如对加密的参数进行解密
-		if !bindRouteInput(ctx, &h) {
-			return nil
+	}
+	for _, idx := range prefixCandidates {
+		h := &r.parsedRoutes[idx]
+		patParts := splitPath(h.path)
+		if !pathHasPrefix(reqParts, patParts) {
+			continue
 		}
-		response := h.handler(ctx)
-		if resp, stop := runAfterRouteGuards(ctx, r.AfterHandler, response); stop {
-			return resp
+		pathMatched = true
+		if h.method != ANY && h.method != method {
+			continue
 		}
-		return response
+		return r.dispatch(ctx, h, make(map[string]Param))
 	}
 
 	if pathMatched {
@@ -348,6 +363,28 @@ func (r *Router) rootHandler(ctx *Context) *Response {
 		ctx.ResponseError(http.StatusNotFound)
 	}
 	return nil
+}
+
+// dispatch 执行路由守卫与 handler。返回非 nil 表示已有响应（含 nil-终止）。
+func (r *Router) dispatch(ctx *Context, h *parsedRoute, params map[string]Param) *Response {
+	ctx.params = params
+	ctx.method = h.method
+
+	if h.meta != nil {
+		ctx.meta = h.meta
+	}
+	if resp, stop := runBeforeRouteGuards(ctx, r.BeforeHandler); stop {
+		return resp
+	}
+	// 在 beforeHandler 之后解析并绑定 DTO，这样可以在 beforeHandler 中对参数做前置处理，比如对加密的参数进行解密
+	if !bindRouteInput(ctx, h) {
+		return nil
+	}
+	response := h.handler(ctx)
+	if resp, stop := runAfterRouteGuards(ctx, r.AfterHandler, response); stop {
+		return resp
+	}
+	return response
 }
 
 // bindDTOFromMap 将 map[string]any 按 proto 类型 JSON 对齐解码

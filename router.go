@@ -10,6 +10,7 @@ import (
 // route 路由条目结构体
 type parsedRoute struct {
 	method   Method         // 请求方法
+	path     string         // 完整路径
 	handler  Handler        // 处理函数
 	query    DTO            // 查询参数绑定模型
 	body     DTO            // 请求体绑定模型
@@ -95,12 +96,12 @@ type AfterRouteGuard func(ctx *Context, response *Response) *Response
 
 // Router 路由器结构体
 type Router struct {
-	middleware    []Middleware           // 全局中间件
-	routes        []Route                // 路由表
-	root          Handler                // 根处理器
-	parsedRoutes  map[string]parsedRoute // 解析后的路由表
-	BeforeHandler []BeforeRouteGuard     // 前置守卫链，按切片下标顺序依次执行
-	AfterHandler  []AfterRouteGuard      // 后置守卫链，按切片下标顺序依次执行
+	middleware    []Middleware       // 全局中间件
+	routes        []Route            // 路由表
+	root          Handler            // 根处理器
+	parsedRoutes  []parsedRoute      // 解析后的路由表（有序，注册顺序即匹配顺序）
+	BeforeHandler []BeforeRouteGuard // 前置守卫链，按切片下标顺序依次执行
+	AfterHandler  []AfterRouteGuard  // 后置守卫链，按切片下标顺序依次执行
 }
 
 // useRoutes 应用路由
@@ -154,10 +155,6 @@ type routeEntry struct {
 
 // parseRoute 解析路由
 func (r *Router) parseRoute() {
-	if r.parsedRoutes == nil {
-		r.parsedRoutes = make(map[string]parsedRoute)
-	}
-
 	var entries []routeEntry
 	r.flatten("", r.routes, nil, nil, "", &entries)
 
@@ -233,8 +230,15 @@ func (r *Router) flatten(prefix string, routes []Route, parentMW []Middleware, p
 			for i := len(mw) - 1; i >= 0; i-- {
 				handler = mw[i](handler)
 			}
-			key := string(method) + " " + fullPath
-			r.parsedRoutes[key] = parsedRoute{method: method, handler: handler, query: route.Query, body: route.Body, meta: mergedMeta, isPrefix: route.IsStatic || route.IsSPA}
+			r.parsedRoutes = append(r.parsedRoutes, parsedRoute{
+				method:   method,
+				path:     fullPath,
+				handler:  handler,
+				query:    route.Query,
+				body:     route.Body,
+				meta:     mergedMeta,
+				isPrefix: route.IsStatic || route.IsSPA,
+			})
 			*entries = append(*entries, routeEntry{method: string(method), path: fullPath})
 		}
 

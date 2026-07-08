@@ -58,6 +58,14 @@ func RequestIdMiddleware() Middleware {
 func LogMiddleware() Middleware {
 	return func(next Handler) Handler {
 		return func(ctx *Context) *Response {
+			// WebSocket 是长连接，handler 会阻塞直到连接关闭，
+			// 不应按常规请求计算耗时（会被误报为 SLOW）。
+			if ctx.IsWebSocket() {
+				ip := strings.Join(ctx.GetClientIP(), ",")
+				Log.I("HTTP", "WS | %s | %s | %s | %s", ctx.GetPath(), ip, ctx.RequestID, ctx.r.UserAgent())
+				return next(ctx)
+			}
+
 			start := time.Now()
 			resp := next(ctx)
 			duration := time.Since(start)
